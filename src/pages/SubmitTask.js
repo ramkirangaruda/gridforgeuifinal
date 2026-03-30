@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import axios from "axios";
 import { motion } from "framer-motion";
+import Dashboard from "../Dashboard";
 
 const ToggleSwitch = ({ enabled, setEnabled }) => {
   return (
@@ -82,6 +83,7 @@ const SuccessMessage = ({ show }) =>
 const SubmitTask = () => {
   const [code, setCode] = useState("");
   const [gpu, setGpu] = useState(false);
+  const [split, setSplit] = useState(false);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState("");
@@ -100,6 +102,7 @@ const SubmitTask = () => {
       await axios.post("http://172.20.10.3:5050/submit-task", {
         code: code,
         requires_gpu: gpu,
+        split: split,
       });
 
       setSuccess(true);
@@ -150,11 +153,17 @@ const SubmitTask = () => {
         </div>
 
         {/* GPU Toggle */}
-        <div className="flex items-center justify-between mb-8 bg-white/5 p-4 rounded-lg backdrop-blur border border-white/20">
+        <div className="flex items-center justify-between mb-4 bg-white/5 p-4 rounded-lg backdrop-blur border border-white/20">
           <label className="text-sm font-medium text-white/90">
             Requires GPU
           </label>
           <ToggleSwitch enabled={gpu} setEnabled={setGpu} />
+        </div>
+
+        {/* Split Toggle */}
+        <div className="flex items-center justify-between mb-8 bg-white/5 p-4 rounded-lg backdrop-blur border border-white/20">
+          <label className="text-sm font-medium text-white/90">Split task</label>
+          <ToggleSwitch enabled={split} setEnabled={setSplit} />
         </div>
 
         {/* Submit Button */}
@@ -182,6 +191,11 @@ const SubmitTask = () => {
         <p className="text-center text-white/60 text-xs mt-4">
           Make sure your code is complete before submitting
         </p>
+
+        {/* Live Results Dashboard */}
+        <div className="mt-10 pt-6 border-t border-white/20">
+          <Dashboard />
+        </div>
 
         {/* Additional Info Section */}
         <motion.div

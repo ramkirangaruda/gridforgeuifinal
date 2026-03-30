@@ -1,6 +1,19 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { motion, AnimatePresence } from "framer-motion";
+
+const normalizeTasks = (data) => {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data.results)) return data.results;
+    if (Array.isArray(data.tasks)) return data.tasks;
+    if (data.task_id || data.id) return [data];
+
+    // If the API returns a map/object of tasks keyed by id
+    const values = Object.values(data);
+    if (values.length && values.every((v) => v && typeof v === "object")) return values;
+    return [];
+};
 
 const statusColors = {
     pending: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
@@ -11,6 +24,16 @@ const statusColors = {
 const TaskCard = ({ task }) => {
     const statusClass = statusColors[task.status] || "bg-gray-500/20 text-gray-300 border-gray-500/30";
     const isGpuTask = task.requires_gpu === true;
+    const outputText = useMemo(() => {
+        const output = task?.output ?? task?.result ?? task?.final_output ?? task?.stdout ?? task?.message;
+        if (output === undefined || output === null) return "";
+        if (typeof output === "string") return output;
+        try {
+            return JSON.stringify(output, null, 2);
+        } catch {
+            return String(output);
+        }
+    }, [task]);
 
     return (
         <motion.div
@@ -47,7 +70,7 @@ const TaskCard = ({ task }) => {
             <div className="mt-4">
                 <p className="text-sm font-bold text-gray-400 mb-2">Output:</p>
                 <pre className="bg-black rounded-md p-4 text-sm text-green-400 font-mono overflow-auto max-h-60">
-                    <code>{task.output}</code>
+                    <code>{outputText || "(no output yet)"}</code>
                 </pre>
             </div>
         </motion.div>
@@ -57,29 +80,37 @@ const TaskCard = ({ task }) => {
 
 function Dashboard() {
     const [tasks, setTasks] = useState([]);
+    const [error, setError] = useState("");
 
-    const fetchTasks = async () => {
+    const fetchTasks = useCallback(async () => {
         try {
             const res = await axios.get("http://172.20.10.3:5050/results");
-            setTasks(res.data);
+            setTasks(normalizeTasks(res.data));
+            setError("");
         } catch (err) {
             console.error(err);
+            setError("Failed to load results");
         }
-    };
+    }, []);
 
     useEffect(() => {
         fetchTasks();
         const interval = setInterval(fetchTasks, 2000);
         return () => clearInterval(interval);
-    }, []);
+    }, [fetchTasks]);
 
     return (
         <div className="space-y-4">
             <h2 className="text-2xl font-bold text-cyan-300">Task Dashboard</h2>
+            {error ? (
+                <div className="text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                    {error}
+                </div>
+            ) : null}
             <AnimatePresence>
                 {tasks.length > 0 ? (
                     tasks.map((task) => (
-                        <TaskCard key={task.task_id} task={task} />
+                        <TaskCard key={task.task_id ?? task.id ?? JSON.stringify(task)} task={task} />
                     ))
                 ) : (
                     <div className="text-center py-10 text-gray-500">
