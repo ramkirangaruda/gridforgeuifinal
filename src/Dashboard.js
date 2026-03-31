@@ -2,6 +2,58 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { motion, AnimatePresence } from "framer-motion";
 
+const TASK_HIDE_AFTER_MS = 6000;
+
+const getTaskKey = (task) => {
+    return task?.task_id ?? task?.id ?? "";
+};
+
+const getTaskTimestampMs = (task) => {
+    const candidates = [
+        task?.updated_at,
+        task?.completed_at,
+        task?.finished_at,
+        task?.ended_at,
+        task?.end_time,
+        task?.started_at,
+        task?.start_time,
+        task?.created_at,
+        task?.submitted_at,
+        task?.timestamp,
+        task?.time,
+        task?.ts,
+    ];
+
+    for (const value of candidates) {
+        if (value === undefined || value === null) continue;
+
+        if (typeof value === "number" && Number.isFinite(value)) {
+            // Heuristic: seconds vs milliseconds
+            if (value > 1e12) return value;
+            if (value > 1e9) return value * 1000;
+            continue;
+        }
+
+        if (typeof value === "string") {
+            const parsed = Date.parse(value);
+            if (!Number.isNaN(parsed)) return parsed;
+
+            const asNumber = Number(value);
+            if (Number.isFinite(asNumber)) {
+                if (asNumber > 1e12) return asNumber;
+                if (asNumber > 1e9) return asNumber * 1000;
+            }
+        }
+    }
+
+    return undefined;
+};
+
+const isFailedTask = (task) => {
+    const status = typeof task?.status === "string" ? task.status.toLowerCase() : "";
+    return status === "failed" || status === "error" || status === "errored";
+};
+
 const normalizeTasks = (data) => {
     if (!data) return [];
     if (Array.isArray(data)) return data;
@@ -81,11 +133,40 @@ const TaskCard = ({ task }) => {
 function Dashboard() {
     const [tasks, setTasks] = useState([]);
     const [error, setError] = useState("");
+    const [taskHideAt, setTaskHideAt] = useState({});
 
     const fetchTasks = useCallback(async () => {
         try {
             const res = await axios.get("http://172.20.10.3:5050/results");
-            setTasks(normalizeTasks(res.data));
+            const normalized = normalizeTasks(res.data);
+            const now = Date.now();
+            const keys = new Set(normalized.map(getTaskKey).filter(Boolean));
+
+            setTasks(normalized);
+            setTaskHideAt((prev) => {
+                const next = { ...prev };
+
+                for (const task of normalized) {
+                    const key = getTaskKey(task);
+                    if (!key) continue;
+
+                    if (task.status === "processing") {
+                        delete next[key];
+                        continue;
+                    }
+
+                    if (!next[key] || next[key] < now) {
+                        next[key] = now + TASK_HIDE_AFTER_MS;
+                    }
+                }
+
+                // Clean up entries for tasks that disappeared from the API
+                for (const key of Object.keys(next)) {
+                    if (!keys.has(key)) delete next[key];
+                }
+
+                return next;
+            });
             setError("");
         } catch (err) {
             console.error(err);
@@ -99,17 +180,99 @@ function Dashboard() {
         return () => clearInterval(interval);
     }, [fetchTasks]);
 
+    const summary = useMemo(() => {
+        const pending = tasks.filter((t) => t.status === "pending").length;
+        const processingTasks = tasks.filter((t) => t.status === "processing");
+        const processing = processingTasks.length;
+        const completed = tasks.filter((t) => t.status === "completed").length;
+        const activeWorkers = new Set(
+            processingTasks
+                .map((t) => t.worker_id)
+                .filter((w) => w !== undefined && w !== null && String(w).trim() !== "")
+        ).size;
+
+        return { activeWorkers, pending, processing, completed };
+    }, [tasks]);
+
+    const failedTasks = useMemo(() => {
+        return tasks
+            .filter(isFailedTask)
+            .map((task, apiIndex) => ({ task, apiIndex, ts: getTaskTimestampMs(task) }))
+            .sort((a, b) => {
+                const aKey = a.ts ?? a.apiIndex;
+                const bKey = b.ts ?? b.apiIndex;
+                return bKey - aKey;
+            })
+            .map((x) => x.task);
+    }, [tasks]);
+
+    const visibleTasks = useMemo(() => {
+        const now = Date.now();
+        const filtered = tasks.filter((task) => {
+            if (isFailedTask(task)) return false;
+            const key = getTaskKey(task);
+            if (task.status === "processing") return true;
+            if (!key) return false;
+            return taskHideAt[key] !== undefined && taskHideAt[key] > now;
+        });
+
+        // Sort by recency (latest executed first). Prefer timestamp fields when available.
+        return filtered
+            .map((task, apiIndex) => ({ task, apiIndex, ts: getTaskTimestampMs(task) }))
+            .sort((a, b) => {
+                const aKey = a.ts ?? a.apiIndex;
+                const bKey = b.ts ?? b.apiIndex;
+                return bKey - aKey;
+            })
+            .map((x) => x.task);
+    }, [tasks, taskHideAt]);
+
+    const primaryTasks = useMemo(() => {
+        const top = visibleTasks.slice(0, 2);
+        // Within the top set, keep processing tasks first (still newest-first overall).
+        return top
+            .map((task, i) => ({ task, i }))
+            .sort((a, b) => {
+                const aRank = a.task.status === "processing" ? 0 : 1;
+                const bRank = b.task.status === "processing" ? 0 : 1;
+                if (aRank !== bRank) return aRank - bRank;
+                return a.i - b.i;
+            })
+            .map((x) => x.task);
+    }, [visibleTasks]);
+    const overflowTasks = useMemo(() => visibleTasks.slice(2), [visibleTasks]);
+
     return (
         <div className="space-y-4">
             <h2 className="text-2xl font-bold text-cyan-300">Task Dashboard</h2>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div className="text-xs text-white/60">Active workers</div>
+                    <div className="text-xl font-bold text-white">{summary.activeWorkers}</div>
+                </div>
+                <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div className="text-xs text-white/60">Pending</div>
+                    <div className="text-xl font-bold text-white">{summary.pending}</div>
+                </div>
+                <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div className="text-xs text-white/60">Processing</div>
+                    <div className="text-xl font-bold text-white">{summary.processing}</div>
+                </div>
+                <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div className="text-xs text-white/60">Completed</div>
+                    <div className="text-xl font-bold text-white">{summary.completed}</div>
+                </div>
+            </div>
+
             {error ? (
                 <div className="text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
                     {error}
                 </div>
             ) : null}
             <AnimatePresence>
-                {tasks.length > 0 ? (
-                    tasks.map((task) => (
+                {primaryTasks.length > 0 ? (
+                    primaryTasks.map((task) => (
                         <TaskCard key={task.task_id ?? task.id ?? JSON.stringify(task)} task={task} />
                     ))
                 ) : (
@@ -118,6 +281,32 @@ function Dashboard() {
                     </div>
                 )}
             </AnimatePresence>
+
+            {overflowTasks.length > 0 ? (
+                <details className="bg-white/5 border border-white/10 rounded-xl p-4">
+                    <summary className="cursor-pointer select-none text-sm font-semibold text-white/80 hover:text-white">
+                        Show older tasks ({overflowTasks.length})
+                    </summary>
+                    <div className="mt-4 space-y-4">
+                        {overflowTasks.map((task) => (
+                            <TaskCard key={task.task_id ?? task.id ?? JSON.stringify(task)} task={task} />
+                        ))}
+                    </div>
+                </details>
+            ) : null}
+
+            {failedTasks.length > 0 ? (
+                <details className="bg-red-500/5 border border-red-500/10 rounded-xl p-4">
+                    <summary className="cursor-pointer select-none text-sm font-semibold text-red-200 hover:text-red-100">
+                        Failed tasks ({failedTasks.length})
+                    </summary>
+                    <div className="mt-4 space-y-4">
+                        {failedTasks.map((task) => (
+                            <TaskCard key={task.task_id ?? task.id ?? JSON.stringify(task)} task={task} />
+                        ))}
+                    </div>
+                </details>
+            ) : null}
         </div>
     );
 }
